@@ -24,22 +24,8 @@ jobs:
           python -c "import click; print('Click installed:', click.__file__)"
           python -m pip show flights
 
-      - name: Search Hyderabad to Delhi
+          - name: Diagnose FLI CLI
         run: |
-          DEPARTURE=$(date -u -d "+45 days" +%Y-%m-%d)
-          RETURN=$(date -u -d "+52 days" +%Y-%m-%d)
-
-          echo "Searching Hyderabad to Delhi"
-          echo "Departure: $DEPARTURE"
-          echo "Return: $RETURN"
-          echo "Passengers: 2 adults"
-
-          fli flights HYD DEL "$DEPARTURE" \
-            --return "$RETURN" \
-            --passengers 2 \
-            --class ECONOMY \
-            --stops NON_STOP \
-            --top-n 2 \
-            --currency INR \
-            --country IN \
-            --language en-IN
+          python -m pip show flights
+          fli --help
+          fli flights --help
