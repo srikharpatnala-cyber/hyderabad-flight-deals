@@ -17,7 +17,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install FLI
-        run: python -m pip install flights
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install flights click
 
       - name: Search Hyderabad to Delhi
         run: |
