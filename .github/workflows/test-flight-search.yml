@@ -1,6 +1,6 @@
 name: Test Flight Search
 
-"on":
+on:
   workflow_dispatch:
 
 permissions:
@@ -9,7 +9,7 @@ permissions:
 jobs:
   test-search:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
 
     steps:
       - name: Set up Python
@@ -22,23 +22,129 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install flights click
 
-      - name: Search Hyderabad to Delhi
+      - name: Search multiple destinations and dates
+        shell: bash
         run: |
-          DEPARTURE=$(date -u -d "+45 days" +%Y-%m-%d)
-          RETURN=$(date -u -d "+52 days" +%Y-%m-%d)
+          mkdir -p results
 
-          echo "Searching Hyderabad to Delhi"
-          echo "Departure: $DEPARTURE"
-          echo "Return: $RETURN"
-          echo "Cabin: Economy"
-          echo "Stops: Non-stop only"
+          python <<'PY'
+          import json
+          import os
+          import subprocess
+          import time
+          from datetime import date, timedelta
+          from pathlib import Path
 
-          fli flights HYD DEL "$DEPARTURE" \
-            --return "$RETURN" \
-            --class ECONOMY \
-            --stops 0 \
-            --sort CHEAPEST \
-            --currency INR \
-            --country IN \
-            --language en-IN \
-            --format json
+          output = Path("results/flight-search-results.json")
+          destinations = [
+              "DEL", "BOM", "GOI", "COK",
+              "SIN", "KUL", "BKK", "DXB"
+          ]
+
+          # Two departure windows, with trips of different lengths.
+          departure_offsets = [45, 75]
+          trip_lengths = [3, 7, 14]
+          stop_options = ["0", "1", "2+"]
+
+          searches = []
+          total = (
+              len(destinations)
+              * len(departure_offsets)
+              * len(trip_lengths)
+              * len(stop_options)
+          )
+
+          print(f"Planned searches: {total}")
+
+          for destination in destinations:
+              for offset in departure_offsets:
+                  departure = date.today() + timedelta(days=offset)
+
+                  for trip_length in trip_lengths:
+                      return_date = departure + timedelta(days=trip_length)
+
+                      for stops in stop_options:
+                          command = [
+                              "fli", "flights", "HYD", destination,
+                              departure.isoformat(),
+                              "--return", return_date.isoformat(),
+                              "--class", "ECONOMY",
+                              "--stops", stops,
+                              "--sort", "CHEAPEST",
+                              "--currency", "INR",
+                              "--country", "IN",
+                              "--language", "en-IN",
+                              "--format", "json"
+                          ]
+
+                          entry = {
+                              "origin": "HYD",
+                              "destination": destination,
+                              "departure": departure.isoformat(),
+                              "return": return_date.isoformat(),
+                              "trip_days": trip_length,
+                              "stops_filter": stops,
+                          }
+
+                          print(
+                              f"Searching HYD-{destination}: "
+                              f"{departure} to {return_date}, "
+                              f"stops={stops}"
+                          )
+
+                          try:
+                              result = subprocess.run(
+                                  command,
+                                  capture_output=True,
+                                  text=True,
+                                  timeout=90
+                              )
+
+                              entry["exit_code"] = result.returncode
+
+                              if result.returncode == 0:
+                                  try:
+                                      entry["response"] = json.loads(
+                                          result.stdout
+                                      )
+                                  except json.JSONDecodeError:
+                                      entry["error"] = (
+                                          "Command succeeded but output "
+                                          "was not valid JSON"
+                                      )
+                                      entry["raw_output"] = result.stdout[:2000]
+                              else:
+                                  entry["error"] = result.stderr[-2000:]
+
+                          except subprocess.TimeoutExpired:
+                              entry["error"] = "Search timed out after 90 seconds"
+
+                          searches.append(entry)
+
+                          # Avoid hammering the search provider.
+                          time.sleep(1)
+
+                          # Save progress after each search.
+                          output.write_text(
+                              json.dumps(searches, indent=2),
+                              encoding="utf-8"
+                          )
+
+          successful = sum(
+              1 for item in searches
+              if item.get("exit_code") == 0
+          )
+
+          print(f"Completed {len(searches)} searches.")
+          print(f"Successful commands: {successful}")
+          print(f"Results saved to {output}")
+          PY
+
+      - name: Upload search results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flight-search-results
+          path: results/flight-search-results.json
+          if-no-files-found: warn
+          retention-days: 14
