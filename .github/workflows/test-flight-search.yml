@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 jobs:
-  diagnose:
+  test-search:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -20,11 +20,25 @@ jobs:
       - name: Install FLI
         run: |
           python -m pip install --upgrade pip
-          python -m pip install --no-cache-dir click
-          python -m pip install --no-cache-dir flights
+          python -m pip install flights click
 
-      - name: Diagnose FLI CLI
+      - name: Search Hyderabad to Delhi
         run: |
-          python -m pip show flights
-          fli --help
-          fli flights --help
+          DEPARTURE=$(date -u -d "+45 days" +%Y-%m-%d)
+          RETURN=$(date -u -d "+52 days" +%Y-%m-%d)
+
+          echo "Searching Hyderabad to Delhi"
+          echo "Departure: $DEPARTURE"
+          echo "Return: $RETURN"
+          echo "Cabin: Economy"
+          echo "Stops: Non-stop only"
+
+          fli flights HYD DEL "$DEPARTURE" \
+            --return "$RETURN" \
+            --class ECONOMY \
+            --stops 0 \
+            --sort CHEAPEST \
+            --currency INR \
+            --country IN \
+            --language en-IN \
+            --format json
