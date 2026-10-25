@@ -1,143 +1,104 @@
-name: Test Flight Search
-
-on:
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-  test-search:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install FLI
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install flights click
-
-      - name: Search multiple destinations and dates
-        shell: bash
-        run: |
-          mkdir -p results
-
-          python <<'PY'
-          import json
-          import os
-          import subprocess
-          import time
-          from datetime import date, timedelta
-          from pathlib import Path
-
-          output = Path("results/flight-search-results.json")
-          destinations = [
-              "DEL", "BOM", "GOI", "COK",
-              "SIN", "KUL", "BKK", "DXB"
-          ]
-
-          # Two departure windows, with trips of different lengths.
-          departure_offsets = [45, 75]
-          trip_lengths = [3, 7, 14]
-          stop_options = ["0", "1", "2+"]
-
-          searches = []
-          total = (
-              len(destinations)
-              * len(departure_offsets)
-              * len(trip_lengths)
-              * len(stop_options)
-          )
-
-          print(f"Planned searches: {total}")
-
-          for destination in destinations:
-              for offset in departure_offsets:
-                  departure = date.today() + timedelta(days=offset)
-
-                  for trip_length in trip_lengths:
-                      return_date = departure + timedelta(days=trip_length)
-
-                      for stops in stop_options:
-                          command = [
-                              "fli", "flights", "HYD", destination,
-                              departure.isoformat(),
-                              "--return", return_date.isoformat(),
-                              "--class", "ECONOMY",
-                              "--stops", stops,
-                              "--sort", "CHEAPEST",
-                              "--currency", "INR",
-                              "--country", "IN",
-                              "--language", "en-IN",
-                              "--format", "json"
-                          ]
-
-                          entry = {
-                              "origin": "HYD",
-                              "destination": destination,
-                              "departure": departure.isoformat(),
-                              "return": return_date.isoformat(),
-                              "trip_days": trip_length,
-                              "stops_filter": stops,
-                          }
-
-                          print(
-                              f"Searching HYD-{destination}: "
-                              f"{departure} to {return_date}, "
-                              f"stops={stops}"
-                          )
-
-                          try:
-                              result = subprocess.run(
-                                  command,
-                                  capture_output=True,
-                                  text=True,
-                                  timeout=90
-                              )
-
-                              entry["exit_code"] = result.returncode
+                              entry["stderr"] = result.stderr[-4000:]
 
                               if result.returncode == 0:
                                   try:
-                                      entry["response"] = json.loads(
-                                          result.stdout
-                                      )
+                                      response = json.loads(result.stdout)
+                                      entry["response"] = response
+                                      if response.get("success"):
+                                          for flight in response.get("flights", []) or []:
+                                              key = itinerary_key(entry, flight)
+                                              if key not in unique_flights:
+                                                  unique_flights[key] = {
+                                                      "search": {
+                                                          "origin": entry["origin"],
+                                                          "destination": entry["destination"],
+                                                          "departure": entry["departure"],
+                                                          "return": entry["return"],
+                                                          "trip_days": entry["trip_days"],
+                                                          "stops_filter": entry["stops_filter"],
+                                                      },
+                                                      "flight": flight,
+                                                      "observed_in_searches": [stops],
+                                                  }
+                                              else:
+                                                  observed = unique_flights[key]["observed_in_searches"]
+                                                  if stops not in observed:
+                                                      observed.append(stops)
                                   except json.JSONDecodeError:
-                                      entry["error"] = (
-                                          "Command succeeded but output "
-                                          "was not valid JSON"
-                                      )
-                                      entry["raw_output"] = result.stdout[:2000]
+                                      entry["error"] = "Command succeeded but output was not valid JSON"
+                                      entry["stdout_excerpt"] = result.stdout[:4000]
                               else:
-                                  entry["error"] = result.stderr[-2000:]
+                                  # Preserve stdout too: some CLI errors are written there.
+                                  entry["stdout_excerpt"] = result.stdout[-4000:]
+                                  entry["error"] = "FLI command returned a non-zero exit code"
 
-                          except subprocess.TimeoutExpired:
+                          except subprocess.TimeoutExpired as exc:
                               entry["error"] = "Search timed out after 90 seconds"
+                              entry["stdout_excerpt"] = (exc.stdout or "")[-4000:] if isinstance(exc.stdout, str) else ""
+                              entry["stderr"] = (exc.stderr or "")[-4000:] if isinstance(exc.stderr, str) else ""
 
                           searches.append(entry)
-
-                          # Avoid hammering the search provider.
+                          raw_path.write_text(json.dumps(searches, indent=2), encoding="utf-8")
                           time.sleep(1)
 
-                          # Save progress after each search.
-                          output.write_text(
-                              json.dumps(searches, indent=2),
-                              encoding="utf-8"
-                          )
-
-          successful = sum(
-              1 for item in searches
-              if item.get("exit_code") == 0
+          clean_results = sorted(
+              unique_flights.values(),
+              key=lambda item: (
+                  item["search"]["destination"],
+                  item["search"]["departure"],
+                  item["flight"].get("price", float("inf")),
+              ),
           )
+          clean_path.write_text(json.dumps(clean_results, indent=2), encoding="utf-8")
 
-          print(f"Completed {len(searches)} searches.")
-          print(f"Successful commands: {successful}")
-          print(f"Results saved to {output}")
+          fields = [
+              "origin", "destination", "departure", "return", "trip_days",
+              "price", "currency", "total_duration_minutes", "stops",
+              "outbound_legs", "return_legs", "outbound_airlines",
+              "return_airlines", "self_transfer", "mixed_cabin", "booking_token",
+              "observed_in_stop_filters",
+          ]
+          with csv_path.open("w", newline="", encoding="utf-8") as f:
+              writer = csv.DictWriter(f, fieldnames=fields)
+              writer.writeheader()
+              for item in clean_results:
+                  search = item["search"]
+                  flight = item["flight"]
+                  outbound = leg_summary(flight.get("outbound"))
+                  inbound = leg_summary(flight.get("return"))
+                  writer.writerow({
+                      "origin": search["origin"],
+                      "destination": search["destination"],
+                      "departure": search["departure"],
+                      "return": search["return"],
+                      "trip_days": search["trip_days"],
+                      "price": flight.get("price"),
+                      "currency": flight.get("currency"),
+                      "total_duration_minutes": flight.get("duration"),
+                      "stops": flight.get("stops"),
+                      "outbound_legs": json.dumps(outbound, ensure_ascii=False),
+                      "return_legs": json.dumps(inbound, ensure_ascii=False),
+                      "outbound_airlines": ", ".join(dict.fromkeys(x["airline"] or "" for x in outbound)),
+                      "return_airlines": ", ".join(dict.fromkeys(x["airline"] or "" for x in inbound)),
+                      "self_transfer": (flight.get("outbound") or {}).get("self_transfer"),
+                      "mixed_cabin": (flight.get("outbound") or {}).get("mixed_cabin"),
+                      "booking_token": flight.get("outbound", {}).get("booking_token", ""),
+                      "observed_in_stop_filters": ",".join(item["observed_in_searches"]),
+                  })
+
+          successful = sum(1 for item in searches if item.get("exit_code") == 0 and item.get("response", {}).get("success"))
+          failed = len(searches) - successful
+          raw_flight_count = sum(
+              len(item.get("response", {}).get("flights", []) or [])
+              for item in searches
+              if item.get("response", {}).get("success")
+          )
+          print(f"Completed searches: {len(searches)}")
+          print(f"Successful searches: {successful}")
+          print(f"Failed searches: {failed}")
+          print(f"Raw flight rows: {raw_flight_count}")
+          print(f"Deduplicated itinerary/fare rows: {len(clean_results)}")
+          print(f"Saved {raw_path}, {clean_path}, and {csv_path}")
           PY
 
       - name: Upload search results
@@ -145,6 +106,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: flight-search-results
-          path: results/flight-search-results.json
+          path: results/
           if-no-files-found: warn
           retention-days: 14
